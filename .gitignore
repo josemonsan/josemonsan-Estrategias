@@ -33,3 +33,6 @@ htmlcov/
 .DS_Store
 .vscode/
 .idea/
+
+# Downloaded market data (regenerable via fetch_data.py, not versioned)
+/data/

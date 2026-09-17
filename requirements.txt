@@ -1,0 +1,5 @@
+# cava_trend_strategy_v3.py itself only needs numpy + pandas (see its
+# module docstring). yfinance is only required to run fetch_data.py.
+numpy
+pandas
+yfinance
