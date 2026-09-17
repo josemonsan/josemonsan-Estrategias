@@ -133,6 +133,17 @@ None of this rules out that some sub-piece of Cava v3 has real edge; it means th
 - Per-fold and per-module OOS trade counts were often in the 5–40 range — too small for tight statistical confidence; treat Sharpe/expectancy figures at that scale as noisy point estimates.
 - All analysis scripts live only in this session's scratchpad and are not part of the repo.
 
+## Pine Script port (`pine/cava_trend_strategy_v3.pine`)
+
+Added a single-symbol Pine v6 port of the entry/exit logic in `cava_trend_strategy_v3.py`, for visual bar-by-bar trade inspection on a TradingView chart, with each indicator and entry module independently toggleable.
+
+Deliberate differences from the Python engine:
+
+- Single symbol, single position at a time — the Python PORTFOLIO layer (`top_n_candidates` ranking across tickers, vol targeting, gross-leverage cap) is not replicated; position size uses simple fixed risk-per-trade sizing instead.
+- `v2_confluence` and the seasonality module are not ported (both OFF by default in the Python config, never enabled in this session's testing, and `v2_confluence` is legacy/deprecated per the source docstring). Everything else — `rsi_macd_weekly`, `macd_daily_cross`, `adx_ema20_pullback`, `cci_threshold`, `trap_reversal`, all gates, both stop types, all three trailing modes — is ported.
+- The macro (USD monetary base) gate is optional and OFF by default; it needs a monthly external data series (e.g. `FRED:BOGMBASE` on TradingView, plan-dependent).
+- Higher-timeframe (weekly/monthly) values use `request.security()` with lookahead explicitly off, mirroring the Python resample+ffill logic — only ever uses the last completed weekly/monthly bar.
+
 ## Suggested next steps
 
 - If pursuing `trap_reversal` further: understand *why* it loses (concentrated in a few large losers vs. broad-based, per the max 22–23-trade losing streaks seen in every run) before deciding to fix, gate more tightly, or remove it.

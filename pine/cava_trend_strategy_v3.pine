@@ -1,0 +1,618 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0
+//@version=6
+// =============================================================================
+// Cava Trend Strategy v3 — Pine port for visual trade inspection
+// =============================================================================
+// Faithful single-symbol port of the entry/exit logic in
+// cava_trend_strategy_v3.py, so trades and every indicator involved in this
+// project's research can be inspected visually, bar by bar, on a TradingView
+// chart, with each indicator and each entry module independently toggleable.
+//
+// SCOPE / DELIBERATE DIFFERENCES vs. the Python engine:
+//   - Single symbol, single position at a time (like the Python engine per
+//     ticker) — the Python PORTFOLIO layer (top_n_candidates ranking across
+//     many tickers, vol targeting, gross-leverage cap) is NOT replicated
+//     here; position size instead uses a simple fixed risk-per-trade sizing.
+//   - v2_confluence and the seasonality module are NOT ported: both are OFF
+//     by default in the Python config, were never enabled in this session's
+//     testing, and v2_confluence in particular is legacy/deprecated lineage
+//     per the source docstring. Everything else (rsi_macd_weekly,
+//     macd_daily_cross, adx_ema20_pullback, cci_threshold, trap_reversal,
+//     all gates, both stop types, all three trailing modes) is ported.
+//   - The macro (USD monetary base) gate is optional and OFF by default: it
+//     needs a monthly external data series (e.g. a FRED symbol on
+//     TradingView such as FRED:BOGMBASE, if your plan has that data source).
+//   - Higher-timeframe (weekly/monthly) values use request.security() with
+//     lookahead explicitly off, which — like the Python resample+ffill
+//     logic — only ever uses the last COMPLETED weekly/monthly bar.
+//
+// Every indicator has its own "Show ..." toggle in the "Indicators Display"
+// group, independent from the "Entry Modules" toggles that control whether
+// that module is allowed to trade.
+// =============================================================================
+
+strategy("Cava Trend Strategy v3 (Pine Port)", shorttitle = "CavaV3",
+         overlay = true, initial_capital = 100000,
+         default_qty_type = strategy.fixed, default_qty_value = 1,
+         commission_type = strategy.commission.percent, commission_value = 0.025,
+         slippage = 0, calc_on_order_fills = false, process_orders_on_close = false,
+         max_bars_back = 2000)
+
+// -----------------------------------------------------------------------
+// 1. TREND GATE [LIBRO §3.3 vs §8]
+// -----------------------------------------------------------------------
+grpTrend = "1. Trend gate (multi-timeframe)"
+useWeeklyStochInTrend = input.bool(false, "Use weekly %K in trend gate (strict §3.3)", group = grpTrend,
+     tooltip = "Off (default) = book's §8 entry-table gate: monthly MACD aligned + weekly MACD sign only.")
+trendStochUp   = input.float(60.0, "Weekly %K bullish threshold", group = grpTrend)
+trendStochDn   = input.float(40.0, "Weekly %K bearish threshold", group = grpTrend)
+showTrendBg    = input.bool(true, "Show trend background shading", group = grpTrend)
+
+// -----------------------------------------------------------------------
+// 2. MACD (daily + used for weekly/monthly trend)
+// -----------------------------------------------------------------------
+grpMacd = "2. MACD"
+macdFast   = input.int(12, "Fast length", group = grpMacd)
+macdSlow   = input.int(26, "Slow length", group = grpMacd)
+macdSignal = input.int(9,  "Signal length", group = grpMacd)
+showMacd   = input.bool(true, "Show MACD (daily) pane", group = grpMacd)
+
+// -----------------------------------------------------------------------
+// 3. RSI [LIBRO §6.2]
+// -----------------------------------------------------------------------
+grpRsi = "3. RSI"
+rsiPeriod      = input.int(14, "RSI period", group = grpRsi)
+rsiOsNormal    = input.float(30.0, "Oversold (normal trend)", group = grpRsi)
+rsiOsStrongUp  = input.float(40.0, "Oversold (ADX>strong, uptrend)", group = grpRsi)
+rsiObNormal    = input.float(70.0, "Overbought (normal trend)", group = grpRsi)
+rsiObStrongDn  = input.float(60.0, "Overbought (ADX>strong, downtrend)", group = grpRsi)
+showRsi        = input.bool(true, "Show RSI pane", group = grpRsi)
+
+// -----------------------------------------------------------------------
+// 4. ADX / DMI [LIBRO §6.5]
+// -----------------------------------------------------------------------
+grpAdx = "4. ADX / DMI (Wilder)"
+adxPeriod        = input.int(14, "ADX/DMI period", group = grpAdx)
+adxStrong        = input.float(30.0, "ADX 'strong trend' threshold", group = grpAdx)
+useAdxWilderGate = input.bool(true, "Use Wilder ADX gate (block if ADX < both DI)", group = grpAdx)
+showAdx          = input.bool(true, "Show ADX/DI pane", group = grpAdx)
+
+// -----------------------------------------------------------------------
+// 5. CCI [LIBRO §6.4]
+// -----------------------------------------------------------------------
+grpCci = "5. CCI"
+cciPeriod    = input.int(14, "CCI period", group = grpCci)
+cciConstant  = input.float(0.015, "CCI constant (Lambert)", step = 0.001, group = grpCci)
+cciEntryLvl  = input.float(50.0, "CCI entry threshold (module 4)", group = grpCci)
+showCci      = input.bool(false, "Show CCI pane", group = grpCci)
+
+// -----------------------------------------------------------------------
+// 6. Divergences [LIBRO §5] — veto only, never triggers
+// -----------------------------------------------------------------------
+grpDiv = "6. Divergences (veto filter)"
+useDivergenceFilter = input.bool(true, "Use divergence veto", group = grpDiv)
+divPivotK            = input.int(3, "Pivot fractal K (bars each side)", group = grpDiv)
+divCooldownBars      = input.int(15, "Cooldown bars after confirmed divergence", group = grpDiv)
+showDivergence       = input.bool(true, "Show divergence markers", group = grpDiv)
+
+// -----------------------------------------------------------------------
+// 7. Entry modules on/off (mirrors CavaConfigV3 toggles)
+// -----------------------------------------------------------------------
+grpMod = "7. Entry modules"
+enableRsiMacdWeekly    = input.bool(true,  "1) rsi_macd_weekly [LIBRO núcleo]", group = grpMod)
+enableMacdDailyCross   = input.bool(true,  "2) macd_daily_cross [LIBRO §8]", group = grpMod)
+enableAdxEma20Pullback = input.bool(true,  "3) adx_ema20_pullback [LIBRO §7.4]", group = grpMod)
+enableCciThreshold     = input.bool(false, "4) cci_threshold [LIBRO §7.6, off by default]", group = grpMod)
+enableTrapReversal     = input.bool(true,  "5) trap_reversal [BASE/CURSO]", group = grpMod)
+requirePriceConfirm    = input.bool(true,  "Require price confirmation [LIBRO §4]", group = grpMod)
+showEntryMarkers       = input.bool(true,  "Show entry markers (one shape/color per module)", group = grpMod)
+
+// -----------------------------------------------------------------------
+// 8. adx_ema20_pullback module params
+// -----------------------------------------------------------------------
+grpPullback = "8. ADX-EMA20 pullback module"
+pullbackEmaPeriod = input.int(20, "EMA period", group = grpPullback)
+pullbackTouchBars = input.int(3, "Touch must be within N bars", group = grpPullback)
+showEma20 = input.bool(true, "Show EMA20", group = grpPullback)
+showEma50 = input.bool(false, "Show EMA50 (context only)", group = grpPullback)
+
+// -----------------------------------------------------------------------
+// 9. False breakout / trap_reversal params
+// -----------------------------------------------------------------------
+grpTrap = "9. False breakout (trap_reversal)"
+breakoutLookback    = input.int(20, "Prior high/low lookback", group = grpTrap)
+breakoutConfirmBars = input.int(3, "Confirm-back bars", group = grpTrap)
+trapCooldownBars    = input.int(10, "Cooldown bars after a trap signal", group = grpTrap)
+showTrapMarkers     = input.bool(true, "Show false-breakout markers", group = grpTrap)
+
+// -----------------------------------------------------------------------
+// 10. Stops & exits [LIBRO §10 + BASE]
+// -----------------------------------------------------------------------
+grpStop = "10. Stops & exits"
+stopModeInput   = input.string("Structural", "Stop mode", options = ["Structural", "Fixed %"], group = grpStop)
+stopLookbackBars = input.int(5, "Structural stop lookback bars", group = grpStop)
+stopBufferAtrMult = input.float(0.10, "Structural stop ATR buffer", group = grpStop)
+initialStopPct  = input.float(3.0, "Hard-cap stop loss %", group = grpStop) / 100.0
+atrPeriod       = input.int(14, "ATR period", group = grpStop)
+trailingModeInput = input.string("SAR", "Trailing mode", options = ["SAR", "ATR Chandelier", "EMA"], group = grpStop)
+sarAfStart = input.float(0.02, "SAR AF start", group = grpStop)
+sarAfStep  = input.float(0.02, "SAR AF step", group = grpStop)
+sarAfMax   = input.float(0.20, "SAR AF max", group = grpStop)
+trailAtrMult = input.float(2.5, "ATR chandelier multiple", group = grpStop)
+trailEmaPeriod = input.int(10, "Trailing EMA period", group = grpStop)
+useMacdExit = input.bool(true, "MACD daily cross-against exit [LIBRO §8]", group = grpStop)
+maxHoldingBars = input.int(252, "Max holding bars (safety)", group = grpStop)
+showStopLine = input.bool(true, "Show active stop line", group = grpStop)
+showExitMarkers = input.bool(true, "Show exit markers (color = reason)", group = grpStop)
+
+// -----------------------------------------------------------------------
+// 11. Liquidity [BASE]
+// -----------------------------------------------------------------------
+grpLiq = "11. Liquidity filter"
+minAvgVolume     = input.float(1000000, "Min avg volume", group = grpLiq)
+liquidityVolWindow = input.int(63, "Avg volume window", group = grpLiq)
+maxGapPct        = input.float(2.0, "Max single-bar gap %", group = grpLiq) / 100.0
+gapWindow        = input.int(60, "Gap-frequency window", group = grpLiq)
+maxGapFrequency  = input.float(5.0, "Max gap frequency %", group = grpLiq) / 100.0
+
+// -----------------------------------------------------------------------
+// 12. Risk sizing
+// -----------------------------------------------------------------------
+grpRisk = "12. Position sizing"
+riskPerTradePct = input.float(0.5, "Risk per trade % of equity", group = grpRisk) / 100.0
+
+// -----------------------------------------------------------------------
+// 13. Macro gate (optional, needs external monthly data)
+// -----------------------------------------------------------------------
+grpMacro = "13. Macro gate (optional, needs external symbol)"
+useMacroGate   = input.bool(false, "Use macro (monetary base) gate", group = grpMacro)
+macroSymbol    = input.symbol("FRED:BOGMBASE", "Macro monthly symbol", group = grpMacro)
+macroMaPeriod  = input.int(3, "Macro MA period (months)", group = grpMacro)
+macroLookback  = input.int(6, "Macro slope lookback (months)", group = grpMacro)
+
+// -----------------------------------------------------------------------
+// 14. Extra indicators shown for context (ATR%, volume ratio)
+// -----------------------------------------------------------------------
+grpExtra = "14. Extra context indicators"
+showAtrPct   = input.bool(true, "Show ATR % of price pane", group = grpExtra)
+showVolRatio = input.bool(true, "Show volume-vs-63d-avg pane", group = grpExtra)
+volRatioWindow = input.int(63, "Volume ratio window", group = grpExtra)
+
+// =========================================================================
+// INDICATOR CALCULATIONS
+// =========================================================================
+
+[macdFastLine, macdSlowLine, macdHist] = ta.macd(close, macdFast, macdSlow, macdSignal)
+
+rsi = ta.rsi(close, rsiPeriod)
+
+[diPlus, diMinus, adx] = ta.dmi(adxPeriod, adxPeriod)
+
+tp = hlc3
+cciMa  = ta.sma(tp, cciPeriod)
+cciDev = ta.dev(tp, cciPeriod)
+cci = (tp - cciMa) / (cciConstant * cciDev)
+
+atr = ta.atr(atrPeriod)
+atrPct = atr / close * 100.0
+
+ema20 = ta.ema(close, pullbackEmaPeriod)
+ema50 = ta.ema(close, 50)
+emaTrail = ta.ema(close, trailEmaPeriod)
+
+volAvg = ta.sma(volume, volRatioWindow)
+volRatio = volAvg > 0 ? volume / volAvg : na
+
+// --- Higher timeframe trend gate [LIBRO §3.3], only completed HTF bars ---
+[mFast, mSlow, _mHist] = request.security(syminfo.tickerid, "M",
+     ta.macd(close, macdFast, macdSlow, macdSignal), lookahead = barmerge.lookahead_off)
+[wFast, wSlow, _wHist] = request.security(syminfo.tickerid, "W",
+     ta.macd(close, macdFast, macdSlow, macdSignal), lookahead = barmerge.lookahead_off)
+wStochK = request.security(syminfo.tickerid, "W",
+     ta.stoch(close, high, low, 14), lookahead = barmerge.lookahead_off)
+
+upM = mFast > mSlow
+dnM = mFast < mSlow
+upW = wFast > 0
+dnW = wFast < 0
+condUp = upM and upW
+condDn = dnM and dnW
+if useWeeklyStochInTrend
+    condUp := condUp and (wStochK > trendStochUp)
+    condDn := condDn and (wStochK < trendStochDn)
+
+trendDir = condUp ? 1 : condDn ? -1 : 0
+
+// --- Macro gate (optional) ---
+macroOkLong = true
+macroOkShort = true
+if useMacroGate
+    macroSeries = request.security(macroSymbol, "M", close, lookahead = barmerge.lookahead_off)
+    macroMa = ta.sma(macroSeries, macroMaPeriod)
+    macroMaPrev = macroMa[macroLookback]
+    macroSlope = (macroMa - macroMaPrev) / math.abs(macroMaPrev)
+    macroRegime = macroSlope > 0 ? 1 : macroSlope < 0 ? -1 : 0
+    macroOkLong  := macroRegime != -1
+    macroOkShort := macroRegime != 1
+
+// --- Wilder ADX gate ---
+strongAdx = adx > adxStrong
+adxOk = useAdxWilderGate ? not (adx < diPlus and adx < diMinus) : true
+
+// --- Liquidity filter ---
+volOk = ta.sma(volume, liquidityVolWindow) >= minAvgVolume
+gapPct = math.abs(open - close[1]) / close[1]
+gapFlag = gapPct > maxGapPct ? 1.0 : 0.0
+gapFreq = ta.sma(gapFlag, gapWindow)
+gapsOk = gapFreq <= maxGapFrequency
+liquidOk = volOk and gapsOk
+
+// =========================================================================
+// DIVERGENCES [LIBRO §5] — pivot-based, confirmed k bars later, veto only
+// =========================================================================
+pivHigh = ta.pivothigh(high, divPivotK, divPivotK)
+pivLow  = ta.pivotlow(low, divPivotK, divPivotK)
+
+var float lastPivHighVal = na
+var int   lastPivHighBar = na
+var float lastPivHighRsi = na
+var float lastPivLowVal  = na
+var int   lastPivLowBar  = na
+var float lastPivLowRsi  = na
+
+bearDivKnown = false
+bullDivKnown = false
+
+if not na(pivHigh)
+    pivBar = bar_index - divPivotK
+    pivRsiVal = rsi[divPivotK]
+    if not na(lastPivHighVal) and (bar_index - lastPivHighBar) <= 60
+        if pivHigh > lastPivHighVal and pivRsiVal < lastPivHighRsi
+            bearDivKnown := true
+    lastPivHighVal := pivHigh
+    lastPivHighBar := pivBar
+    lastPivHighRsi := pivRsiVal
+
+if not na(pivLow)
+    pivBar = bar_index - divPivotK
+    pivRsiVal = rsi[divPivotK]
+    if not na(lastPivLowVal) and (bar_index - lastPivLowBar) <= 60
+        if pivLow < lastPivLowVal and pivRsiVal > lastPivLowRsi
+            bullDivKnown := true
+    lastPivLowVal := pivLow
+    lastPivLowBar := pivBar
+    lastPivLowRsi := pivRsiVal
+
+var int lastBearDivBar = na
+var int lastBullDivBar = na
+if bearDivKnown
+    lastBearDivBar := bar_index
+if bullDivKnown
+    lastBullDivBar := bar_index
+
+blockLong  = useDivergenceFilter and not na(lastBearDivBar) and (bar_index - lastBearDivBar) <= divCooldownBars
+blockShort = useDivergenceFilter and not na(lastBullDivBar) and (bar_index - lastBullDivBar) <= divCooldownBars
+
+// =========================================================================
+// FALSE BREAKOUT / TRAP REVERSAL [BASE/CURSO]
+// =========================================================================
+priorHigh = ta.highest(high, breakoutLookback)[1]
+priorLow  = ta.lowest(low, breakoutLookback)[1]
+
+var int pendingUpBar = na     // bar index where price broke above priorHigh, watching for close back below
+var float pendingUpLevel = na
+var int pendingDnBar = na
+var float pendingDnLevel = na
+
+falseUp = false
+falseDown = false
+
+if high > priorHigh and na(pendingUpBar)
+    pendingUpBar := bar_index
+    pendingUpLevel := priorHigh
+if not na(pendingUpBar)
+    if close < pendingUpLevel
+        falseUp := true
+        pendingUpBar := na
+        pendingUpLevel := na
+    else if bar_index - pendingUpBar >= breakoutConfirmBars
+        pendingUpBar := na
+        pendingUpLevel := na
+
+if low < priorLow and na(pendingDnBar)
+    pendingDnBar := bar_index
+    pendingDnLevel := priorLow
+if not na(pendingDnBar)
+    if close > pendingDnLevel
+        falseDown := true
+        pendingDnBar := na
+        pendingDnLevel := na
+    else if bar_index - pendingDnBar >= breakoutConfirmBars
+        pendingDnBar := na
+        pendingDnLevel := na
+
+var int lastFalseUpBar = na
+var int lastFalseDownBar = na
+if falseUp
+    lastFalseUpBar := bar_index
+if falseDown
+    lastFalseDownBar := bar_index
+
+recentFalseUp   = not na(lastFalseUpBar) and (bar_index - lastFalseUpBar) <= trapCooldownBars
+recentFalseDown = not na(lastFalseDownBar) and (bar_index - lastFalseDownBar) <= trapCooldownBars
+
+// =========================================================================
+// ENTRY MODULES [priority order matches generate_signals_v3: first match wins]
+// =========================================================================
+gateLong  = (trendDir == 1)  and macroOkLong  and liquidOk and adxOk and not blockLong  and not recentFalseUp
+gateShort = (trendDir == -1) and macroOkShort and liquidOk and adxOk and not blockShort and not recentFalseDown
+
+priceConfLong  = requirePriceConfirm ? close > high[1] : true
+priceConfShort = requirePriceConfirm ? close < low[1]  : true
+
+osLevel = strongAdx ? rsiOsStrongUp : rsiOsNormal
+obLevel = strongAdx ? rsiObStrongDn : rsiObNormal
+m1Long  = rsi[1] < osLevel[1] and rsi >= osLevel and priceConfLong
+m1Short = rsi[1] > obLevel[1] and rsi <= obLevel and priceConfShort
+
+m2Long  = ta.crossover(macdFastLine, macdSlowLine)
+m2Short = ta.crossunder(macdFastLine, macdSlowLine)
+
+touchedDn = ta.lowest(low <= ema20 ? 1.0 : 0.0, pullbackTouchBars) [equals to below, use max via highest]
+touchedDown = ta.highest(low <= ema20 ? 1.0 : 0.0, pullbackTouchBars) > 0
+touchedUp   = ta.highest(high >= ema20 ? 1.0 : 0.0, pullbackTouchBars) > 0
+m3Long  = strongAdx and (adx > adx[1]) and (diPlus > diMinus) and touchedDown and close > ema20 and close > close[1]
+m3Short = strongAdx and (adx > adx[1]) and (diMinus > diPlus) and touchedUp   and close < ema20 and close < close[1]
+
+m4Long  = cci > cciEntryLvl and cci[1] <= cciEntryLvl
+m4Short = cci < -cciEntryLvl and cci[1] >= -cciEntryLvl
+
+trapLong  = falseDown and liquidOk and not blockLong  // [BASE/CURSO] contra-escape, no trend gate
+trapShort = falseUp   and liquidOk and not blockShort
+
+var string signalSide = na
+var string signalModule = na
+signalSide := na
+signalModule := na
+
+if enableRsiMacdWeekly and na(signalSide)
+    if m1Long and gateLong
+        signalSide := "long"
+        signalModule := "rsi_macd_weekly"
+    else if m1Short and gateShort
+        signalSide := "short"
+        signalModule := "rsi_macd_weekly"
+if enableMacdDailyCross and na(signalSide)
+    if m2Long and gateLong
+        signalSide := "long"
+        signalModule := "macd_daily_cross"
+    else if m2Short and gateShort
+        signalSide := "short"
+        signalModule := "macd_daily_cross"
+if enableAdxEma20Pullback and na(signalSide)
+    if m3Long and gateLong
+        signalSide := "long"
+        signalModule := "adx_ema20_pullback"
+    else if m3Short and gateShort
+        signalSide := "short"
+        signalModule := "adx_ema20_pullback"
+if enableCciThreshold and na(signalSide)
+    if m4Long and gateLong
+        signalSide := "long"
+        signalModule := "cci_threshold"
+    else if m4Short and gateShort
+        signalSide := "short"
+        signalModule := "cci_threshold"
+if enableTrapReversal and na(signalSide)
+    if trapLong
+        signalSide := "long"
+        signalModule := "trap_reversal"
+    else if trapShort
+        signalSide := "short"
+        signalModule := "trap_reversal"
+
+// =========================================================================
+// STOPS, POSITION STATE & EXITS
+// =========================================================================
+structLow  = ta.lowest(low, stopLookbackBars) - stopBufferAtrMult * atr
+structHigh = ta.highest(high, stopLookbackBars) + stopBufferAtrMult * atr
+
+var string posModule = na
+var float  posStop = na
+var float  posSar = na
+var float  posSarAf = na
+var float  posExtreme = na
+var float  posPrevLow1 = na
+var float  posPrevLow2 = na
+var float  posPrevHigh1 = na
+var float  posPrevHigh2 = na
+var int    posBars = na
+var float  posEntryPrice = na
+
+inPosition = strategy.position_size != 0
+justEntered = inPosition and strategy.position_size[1] == 0
+justFlat = not inPosition and strategy.position_size[1] != 0
+
+// --- New entries (only when flat) ---
+if not inPosition and not na(signalSide)
+    entryStop = signalSide == "long" ? entryPrice_ -> na : na  // placeholder, real calc below
+
+// entryPrice at signal bar is unknown (fills at NEXT bar open); size/stop are
+// computed using the CURRENT bar's structural levels, matching the Python
+// engine (struct levels from the signal bar, filled at next open).
+if not inPosition and not na(signalSide)
+    isLong = signalSide == "long"
+    refPrice = close
+    pctStopLevel = isLong ? refPrice * (1 - initialStopPct) : refPrice * (1 + initialStopPct)
+    structLevel = isLong ? structLow : structHigh
+    useStruct = stopModeInput == "Structural" and not na(structLevel)
+    candStop = useStruct ? (isLong ? math.max(structLevel, pctStopLevel) : math.min(structLevel, pctStopLevel)) : pctStopLevel
+    invalid = isLong ? candStop >= refPrice : candStop <= refPrice
+    finalStop = invalid ? pctStopLevel : candStop
+    riskPerUnit = math.abs(refPrice - finalStop)
+    if riskPerUnit > 0
+        riskCash = strategy.equity * riskPerTradePct
+        qty = riskCash / riskPerUnit
+        if isLong
+            strategy.entry("Long", strategy.long, qty = qty)
+        else
+            strategy.entry("Short", strategy.short, qty = qty)
+        posModule := signalModule
+        posStop := finalStop
+
+// --- Initialize per-trade trailing state on the fill bar ---
+if justEntered
+    posEntryPrice := strategy.position_avg_price
+    posBars := 0
+    posExtreme := strategy.position_avg_price
+    posPrevLow1 := strategy.position_avg_price
+    posPrevLow2 := strategy.position_avg_price
+    posPrevHigh1 := strategy.position_avg_price
+    posPrevHigh2 := strategy.position_avg_price
+    posSarAf := sarAfStart
+    posSar := posStop
+    // posStop already carries the initial structural/pct stop computed at signal time
+
+// --- Update trailing stop & check MACD/time exits while in position ---
+exitReason = na
+if inPosition and not justEntered
+    posBars := posBars + 1
+    isLong = strategy.position_size > 0
+    if isLong
+        newExtreme = math.max(posExtreme, high)
+        if trailingModeInput == "SAR"
+            if newExtreme > posExtreme
+                posSarAf := math.min(posSarAf + sarAfStep, sarAfMax)
+            posSar := posSar + posSarAf * (newExtreme - posSar)
+            posSar := math.min(posSar, posPrevLow1, posPrevLow2)
+            posStop := math.max(posStop, posSar)
+        else if trailingModeInput == "ATR Chandelier"
+            posStop := math.max(posStop, newExtreme - trailAtrMult * atr)
+        else if trailingModeInput == "EMA"
+            posStop := math.max(posStop, emaTrail)
+        posExtreme := newExtreme
+    else
+        newExtreme = math.min(posExtreme, low)
+        if trailingModeInput == "SAR"
+            if newExtreme < posExtreme
+                posSarAf := math.min(posSarAf + sarAfStep, sarAfMax)
+            posSar := posSar + posSarAf * (newExtreme - posSar)
+            posSar := math.max(posSar, posPrevHigh1, posPrevHigh2)
+            posStop := math.min(posStop, posSar)
+        else if trailingModeInput == "ATR Chandelier"
+            posStop := math.min(posStop, newExtreme + trailAtrMult * atr)
+        else if trailingModeInput == "EMA"
+            posStop := math.min(posStop, emaTrail)
+        posExtreme := newExtreme
+    posPrevLow2 := posPrevLow1
+    posPrevLow1 := low
+    posPrevHigh2 := posPrevHigh1
+    posPrevHigh1 := high
+
+    macdExitLong  = useMacdExit and ta.crossunder(macdFastLine, macdSlowLine)
+    macdExitShort = useMacdExit and ta.crossover(macdFastLine, macdSlowLine)
+    if isLong and macdExitLong
+        exitReason := "macd_cross"
+        strategy.close("Long", comment = "macd_cross")
+    else if not isLong and macdExitShort
+        exitReason := "macd_cross"
+        strategy.close("Short", comment = "macd_cross")
+    else if posBars >= maxHoldingBars
+        exitReason := "time_limit"
+        strategy.close(isLong ? "Long" : "Short", comment = "time_limit")
+    else
+        stopExitReason = (isLong and open <= posStop) or (not isLong and open >= posStop) ? "stop_gap" : "stop"
+        strategy.exit("Stop", isLong ? "Long" : "Short", stop = posStop, comment = stopExitReason)
+
+if justFlat
+    posModule := na
+    posStop := na
+    posBars := na
+
+// =========================================================================
+// PLOTTING — price overlay
+// =========================================================================
+bgColor = showTrendBg ? (trendDir == 1 ? color.new(color.green, 90) : trendDir == -1 ? color.new(color.red, 90) : na) : na
+bgcolor(bgColor)
+
+plot(showEma20 ? ema20 : na, "EMA20", color = color.new(color.blue, 0), linewidth = 1)
+plot(showEma50 ? ema50 : na, "EMA50", color = color.new(color.purple, 0), linewidth = 1)
+
+plot(showStopLine and inPosition ? posStop : na, "Active stop", color = color.new(color.red, 0),
+     style = plot.style_linebr, linewidth = 2)
+plot(showStopLine and inPosition and trailingModeInput == "SAR" ? posSar : na, "SAR",
+     color = color.new(color.orange, 0), style = plot.style_circles, linewidth = 1)
+
+moduleColor(m) =>
+    m == "rsi_macd_weekly" ? color.lime :
+     m == "macd_daily_cross" ? color.blue :
+     m == "adx_ema20_pullback" ? color.orange :
+     m == "cci_threshold" ? color.fuchsia :
+     m == "trap_reversal" ? color.gray : color.black
+
+plotshape(showEntryMarkers and justEntered and strategy.position_size > 0, "Long entry", shape.triangleup,
+     location.belowbar, moduleColor(posModule), size = size.small, text = posModule)
+plotshape(showEntryMarkers and justEntered and strategy.position_size < 0, "Short entry", shape.triangledown,
+     location.abovebar, moduleColor(posModule), size = size.small, text = posModule)
+
+exitColor(r) => r == "stop_gap" ? color.red : r == "stop" ? color.maroon : r == "macd_cross" ? color.teal : color.gray
+plotshape(showExitMarkers and justFlat, "Exit", shape.xcross, location.abovebar,
+     color = color.new(color.black, 0), size = size.tiny)
+
+plotshape(showDivergence and bearDivKnown, "Bearish divergence", shape.triangledown, location.abovebar,
+     color.new(color.red, 20), size = size.tiny, text = "div")
+plotshape(showDivergence and bullDivKnown, "Bullish divergence", shape.triangleup, location.belowbar,
+     color.new(color.green, 20), size = size.tiny, text = "div")
+
+plotshape(showTrapMarkers and falseUp, "False breakout up", shape.labeldown, location.abovebar,
+     color.new(color.fuchsia, 20), size = size.tiny, text = "trap")
+plotshape(showTrapMarkers and falseDown, "False breakdown", shape.labelup, location.belowbar,
+     color.new(color.fuchsia, 20), size = size.tiny, text = "trap")
+
+// =========================================================================
+// PLOTTING — indicator panes (each independently toggleable)
+// =========================================================================
+plot(showRsi ? rsi : na, "RSI", color = color.new(color.purple, 0), display = display.pane)
+hline(showRsi ? rsiObNormal : na, "RSI OB normal", color = color.new(color.red, 60))
+hline(showRsi ? rsiOsNormal : na, "RSI OS normal", color = color.new(color.green, 60))
+plot(showRsi ? osLevel : na, "RSI adaptive OS", color = color.new(color.green, 0))
+plot(showRsi ? obLevel : na, "RSI adaptive OB", color = color.new(color.red, 0))
+
+plot(showMacd ? macdFastLine : na, "MACD fast", color = color.blue, display = display.pane)
+plot(showMacd ? macdSlowLine : na, "MACD signal", color = color.orange, display = display.pane)
+plot(showMacd ? macdHist : na, "MACD hist", color = macdHist >= 0 ? color.teal : color.red,
+     style = plot.style_columns, display = display.pane)
+
+plot(showAdx ? adx : na, "ADX", color = color.black, display = display.pane)
+plot(showAdx ? diPlus : na, "+DI", color = color.green, display = display.pane)
+plot(showAdx ? diMinus : na, "-DI", color = color.red, display = display.pane)
+hline(showAdx ? adxStrong : na, "ADX strong", color = color.new(color.gray, 40))
+
+plot(showCci ? cci : na, "CCI", color = color.new(color.navy, 0), display = display.pane)
+hline(showCci ? cciEntryLvl : na, "CCI +entry", color = color.new(color.green, 60))
+hline(showCci ? -cciEntryLvl : na, "CCI -entry", color = color.new(color.red, 60))
+
+plot(showAtrPct ? atrPct : na, "ATR % of price", color = color.new(color.maroon, 0), display = display.pane)
+
+plot(showVolRatio ? volRatio : na, "Volume / 63d avg", color = color.new(color.silver, 0),
+     style = plot.style_columns, display = display.pane)
+hline(showVolRatio ? 1.0 : na, "Vol ratio = 1", color = color.new(color.gray, 40))
+
+// =========================================================================
+// ON-CHART INFO TABLE
+// =========================================================================
+var table infoTable = table.new(position.top_right, 2, 6, border_width = 1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Position", text_color = color.white, bgcolor = color.gray)
+    table.cell(infoTable, 1, 0, inPosition ? (strategy.position_size > 0 ? "LONG" : "SHORT") : "FLAT",
+         text_color = color.white, bgcolor = color.gray)
+    table.cell(infoTable, 0, 1, "Module", text_color = color.black)
+    table.cell(infoTable, 1, 1, na(posModule) ? "-" : posModule, text_color = color.black)
+    table.cell(infoTable, 0, 2, "Bars held", text_color = color.black)
+    table.cell(infoTable, 1, 2, na(posBars) ? "-" : str.tostring(posBars), text_color = color.black)
+    table.cell(infoTable, 0, 3, "Stop", text_color = color.black)
+    table.cell(infoTable, 1, 3, na(posStop) ? "-" : str.tostring(posStop, format.mintick), text_color = color.black)
+    table.cell(infoTable, 0, 4, "Trend", text_color = color.black)
+    table.cell(infoTable, 1, 4, trendDir == 1 ? "UP" : trendDir == -1 ? "DOWN" : "FLAT", text_color = color.black)
+    table.cell(infoTable, 0, 5, "ADX gate", text_color = color.black)
+    table.cell(infoTable, 1, 5, adxOk ? "OK" : "BLOCKED", text_color = color.black)
