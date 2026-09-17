@@ -234,6 +234,20 @@ class CavaConfigV3:
     vol_scalar_floor: float = 0.25
     pending_max_age_bars: int = 3
 
+    # --- Riesgo de gap nocturno [PROPIO — hallazgo de notes/2026-09-17 §9-11:
+    #     los stop_gap (posición salta por encima/debajo del stop en la
+    #     apertura) son el peor bucket de macd_daily_cross, y solo ~1/5 del
+    #     daño coincide con earnings -> el resto es gap genérico de mercado.
+    #     Reduce el tamaño en vez de vetar la entrada. ON por defecto desde
+    #     §11 (reduce MaxDD/vol en las 4 variantes probadas, sin cambiar qué
+    #     trades se toman) -> sigue siendo un trial, no valida la estrategia
+    #     en sí; solo hace las pérdidas más pequeñas.] ---
+    use_gap_risk_sizing: bool = True
+    gap_risk_buffer_mult: float = 1.25       # [PROPIO] infla el riesgo asumido -> tamaño ÷ este factor,
+                                              # para todas las entradas (cubre el gap genérico, ~79% del daño)
+    earnings_gap_lookahead_days: int = 3      # [PROPIO] ventana adelante desde la entrada
+    earnings_gap_size_mult: float = 0.5       # [PROPIO] recorte extra si hay earnings dentro de esa ventana
+
     # --- Escaneo semanal de universo [BASE: "buceos semanales"] ---
     top_n_candidates: int = 10
 
@@ -780,6 +794,7 @@ def run_portfolio_backtest(
     macro_monthly: pd.DataFrame,
     config: CavaConfigV3,
     initial_equity: float = 1.0,
+    earnings_dates: Optional[dict[str, pd.DatetimeIndex]] = None,
 ) -> BacktestResult:
     macro_reg = macro_regime(macro_monthly, config)
 
@@ -899,7 +914,15 @@ def run_portfolio_backtest(
             if risk_per_unit <= 0:
                 continue
             scalar = _vol_scalar()
-            risk_cash = prev_equity * config.risk_per_trade * scalar
+            size_mult = 1.0
+            if config.use_gap_risk_sizing:
+                size_mult /= config.gap_risk_buffer_mult
+                edates = earnings_dates.get(tkr) if earnings_dates else None
+                if edates is not None and len(edates):
+                    horizon = d + pd.Timedelta(days=config.earnings_gap_lookahead_days)
+                    if ((edates >= d) & (edates <= horizon)).any():
+                        size_mult *= config.earnings_gap_size_mult
+            risk_cash = prev_equity * config.risk_per_trade * scalar * size_mult
             units = risk_cash / risk_per_unit
             notional = units * entry_price
             current_gross = sum(abs(_signed(p)) * p.last_price for p in open_positions.values())
