@@ -9,11 +9,11 @@
 
 ## Setup
 
-- **Environment:** the sandbox had no Python data-science stack installed. Installed `python3-pandas`, `python3-numpy`, `python3-pip`, `python3.14-venv` via `apt`, plus `yfinance` in a scratch virtualenv (not added to this repo or its dependencies).
+- **Environment:** the sandbox had no Python data-science stack installed. Installed `python3-pandas`, `python3-numpy`, `python3-pip`, `python3.14-venv` via `apt`, plus `yfinance` in a scratch virtualenv.
 - **Price data:** Yahoo Finance daily OHLCV, split/dividend-adjusted (`yfinance`, `auto_adjust=True`).
 - **Macro data:** FRED series `BOGMBASE` (USD monetary base, monthly) — the only macro column the engine actually reads (`macro_regime()`, column default `"monetary_base"`).
 - **Date range:** 2015-01-01 through 2026-09-17 (today).
-- **Scripts used:** ad hoc, written to the session scratchpad only (`run_real_data.py`, `run_walkforward.py`, `run_macd_isolated.py`, `run_macd_isolated_walkforward.py`) — **not committed to this repo**. Not reproducible from the repo alone; regenerate on request if needed.
+- **Scripts used (§1-12):** ad hoc, written to the session scratchpad only (`run_real_data.py`, `run_walkforward.py`, `run_macd_isolated.py`, `run_macd_isolated_walkforward.py`, and more added through §9-11) — **not committed to this repo**, and at the time not reproducible from the repo alone. **Superseded by `fetch_data.py`** (repo root, added in §13): the same price/macro/earnings fetch logic these scripts duplicated is now a single committed, path-parameterized module + CLI (`python3 fetch_data.py --universe universe_43.csv --out-dir data`), with `yfinance` declared in `requirements.txt`. The per-question analysis logic on top of that data (module isolation, walk-forward folds, pattern mining) remains scratchpad-only ad hoc, per §13.
 
 ---
 
@@ -131,7 +131,7 @@ None of this rules out that some sub-piece of Cava v3 has real edge; it means th
 - Universes were hand-picked large/mid-cap US equities, not a point-in-time, survivorship-bias-free index membership list.
 - FRED `BOGMBASE` was used as the sole macro input; `M1`/`M2` (present in the synthetic macro generator) were never wired in because the engine's default `macro_regime()` only reads `monetary_base`.
 - Per-fold and per-module OOS trade counts were often in the 5–40 range — too small for tight statistical confidence; treat Sharpe/expectancy figures at that scale as noisy point estimates.
-- All analysis scripts live only in this session's scratchpad and are not part of the repo.
+- All analysis scripts live only in this session's scratchpad and are not part of the repo (the price/macro fetch calls they made are now available in committed form via `fetch_data.py`, see §13 — the module-isolation and fold logic on top of that data is still scratchpad-only).
 
 ## Pine Script port (`pine/cava_trend_strategy_v3.pine`)
 
@@ -201,7 +201,7 @@ The win-rate lift is real and consistent — it holds in both the train and test
 
 **Overall read:** no indicator- or correlation-based entry filter tested here survives out-of-sample scrutiny at this sample size (174 trades, down to ~20-60 per sub-group) — reinforcing, not reversing, §8's downgrade of this module to "not distinguishable from noise." The one concrete, actionable lever this analysis surfaced is about **risk management around overnight gaps**, not signal filtering: `stop_gap` exits are the single worst bucket by a wide margin, which points toward smaller position sizing (or avoiding entries) around known gap-risk events (earnings, macro releases) rather than toward a smarter entry indicator. The DI-confirmation idea is worth keeping only if the goal is reducing the frequency/size of losing streaks (behavioral/psychological), not for raising expectancy — it doesn't do that.
 
-Analysis script (`run_macd_pattern_mining.py`) and the per-trade feature CSV live only in this session's scratchpad, same convention as the earlier scripts — not committed to the repo.
+Analysis script (`run_macd_pattern_mining.py`) and the per-trade feature CSV live only in this session's scratchpad, same convention as the earlier scripts — not committed to the repo. (The price fetch it depends on can now be regenerated via committed `fetch_data.py`, see §13.)
 
 ## 10. Follow-up — earnings-date overlap with `stop_gap` losses (same day, 2026-09-17)
 
@@ -221,7 +221,7 @@ But it's a minor contributor by damage share: of the 20 `stop_gap` trades' combi
 
 **Practical implication:** a rule like "skip/flatten `macd_daily_cross` entries if an earnings report is due within the next N days" would be cheap to add and removes a real (if modest, ~1/5) slice of this module's worst-performing bucket — but it would not fix `stop_gap` as a category, because 3 out of 4 of those losses come from gaps with no scheduled earnings involved at all. Reducing position size or tightening initial risk specifically for `macd_daily_cross` (independent of earnings) would address a larger share of the problem than an earnings-calendar filter alone.
 
-Earnings-date cache, the merged trades+earnings CSV, and the analysis script (`run_earnings_overlap.py`) live only in this session's scratchpad, same convention as the earlier scripts.
+Earnings-date cache, the merged trades+earnings CSV, and the analysis script (`run_earnings_overlap.py`) live only in this session's scratchpad, same convention as the earlier scripts. The earnings-date fetch itself is now available in committed form as `fetch_data.py`'s `fetch_earnings()` (see §13) — `python3 fetch_data.py --skip-prices --skip-macro` regenerates `data/earnings_dates.csv` from the repo alone.
 
 ## 11. Follow-up — gap-risk position sizing rule + 3x leverage test (same day, 2026-09-17)
 
@@ -266,6 +266,14 @@ Concatenated OOS MaxDD also improved, -8.63% → -6.83%. Folds 2 and 3 land on t
 
 **Read:** the walk-forward result is now uniformly positive and slightly better everywhere, not just in the single-window §11 comparison — this is a genuine (if still modest) confirmation that the sizing rule's risk reduction holds up under the same fold structure that was used to validate the module in the first place, rather than being a full-sample-only artifact. It does not change the underlying verdict from §8-9: sample sizes remain thin (30-38 trades/fold), the edge (to the extent trade selection differs at all) is not from a smarter filter, and this whole module is still not validated for live trading — it is simply smaller losses/drawdown wrapped around the same signal.
 
+## 13. Follow-up — consolidated `fetch_data.py`, replaces ad hoc scratchpad fetch scripts (same day, 2026-09-17)
+
+Every fetch of price, macro, or earnings data in §1-12 was done by a disposable scratchpad script that re-implemented the same three calls (Yahoo Finance OHLCV via `yfinance`, FRED `BOGMBASE` via a raw HTTP CSV pull, Yahoo earnings dates via `yfinance`'s `get_earnings_dates`), duplicated across `run_real_data.py`, `run_macd_isolated.py`, `run_macd_isolated_walkforward.py`, `run_finegrained.py`, `run_macd_pattern_mining.py`, `run_earnings_overlap.py`, and more — none of it committed, so the "not reproducible from the repo alone" caveat repeated throughout this file was real.
+
+Consolidated that fetch logic into `fetch_data.py` (repo root, committed): `fetch_prices()`, `fetch_macro()`, `fetch_earnings()` as plain importable functions, plus a CLI (`python3 fetch_data.py --universe universe_43.csv --out-dir data`) that reads the ticker list from `universe_43.csv` (added earlier this session) and writes three portable CSVs (`prices.csv`, `macro_monetary_base.csv`, `earnings_dates.csv`) to `--out-dir` (default `data/`, gitignored — the fetched data itself still isn't versioned, only the script that regenerates it). Added `requirements.txt` declaring `yfinance` (the engine itself, `cava_trend_strategy_v3.py`, still only needs numpy/pandas, per its own docstring). Smoke-tested the full CLI end to end against a short date range — all three fetches and CSV outputs came back correctly formatted.
+
+This changes reproducibility, not any documented number: same data sources, same fields, same defaults (`auto_adjust=True`, FRED `BOGMBASE`, Yahoo earnings dates) as every prior section used. The per-question analysis logic built on top of the fetched data (module isolation, walk-forward fold boundaries, pattern-mining feature panels) is still scratchpad-only ad hoc, unchanged from the existing convention — only the shared data-fetching layer moved into the repo.
+
 ## Suggested next steps
 
 - If pursuing `trap_reversal` further: understand *why* it loses (concentrated in a few large losers vs. broad-based, per the max 22–23-trade losing streaks seen in every run) before deciding to fix, gate more tightly, or remove it.
@@ -274,4 +282,5 @@ Concatenated OOS MaxDD also improved, -8.63% → -6.83%. Folds 2 and 3 land on t
 - §10 checked that lever against real earnings dates: earnings only explain ~1/5 of `stop_gap`'s total damage (2.3x over-represented but a minority contributor); an earnings-avoidance filter is cheap and worth adding but won't fix the category — the bulk of `stop_gap` risk is generic overnight gaps unrelated to earnings, better addressed via position sizing/risk limits than a calendar filter.
 - §11 implemented that sizing rule (`use_gap_risk_sizing`, off by default at the time) and tested it with 3x leverage: the sizing rule genuinely trims MaxDD/vol; 3x leverage alone does not help (avg gross exposure never got close to even the 2x cap, so the leverage ceiling was rarely the binding constraint) — the module is still net-negative on every variant tested.
 - §12 turned `use_gap_risk_sizing` ON by default and re-ran the §7 walk-forward: OOS Sharpe improved in every fold (concatenated +0.22 → +0.32, MaxDD -8.63% → -6.83%), confirming the risk reduction holds under walk-forward, not just a full-sample comparison. Still not an edge — smaller losses on the same signal, same thin sample-size caveats as §8-9.
+- §13 moved the shared data-fetching layer into committed `fetch_data.py` — any future work on this strategy can pull fresh prices/macro/earnings straight from the repo instead of rewriting the same three fetch calls again; the per-question analysis scripts (module isolation, folds, feature panels) are still scratchpad ad hoc by design.
 - Consider point-in-time index constituents (e.g. historical S&P 500 membership) instead of a hand-picked, survivorship-biased ticker list, to remove one more degree of freedom from these results.
