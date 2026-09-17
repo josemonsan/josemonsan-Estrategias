@@ -1,0 +1,44 @@
+ticker,sector
+AAPL,Tecnologia
+MSFT,Tecnologia
+NVDA,Tecnologia
+ORCL,Tecnologia
+CSCO,Tecnologia
+ADBE,Tecnologia
+CRM,Tecnologia
+INTC,Tecnologia
+AVGO,Tecnologia
+QCOM,Tecnologia
+GOOGL,Comunicacion/Consumo discrecional
+META,Comunicacion/Consumo discrecional
+DIS,Comunicacion/Consumo discrecional
+NFLX,Comunicacion/Consumo discrecional
+CMCSA,Comunicacion/Consumo discrecional
+AMZN,Comunicacion/Consumo discrecional
+HD,Comunicacion/Consumo discrecional
+MCD,Comunicacion/Consumo discrecional
+NKE,Comunicacion/Consumo discrecional
+SBUX,Comunicacion/Consumo discrecional
+PG,Consumo basico
+KO,Consumo basico
+PEP,Consumo basico
+WMT,Consumo basico
+COST,Consumo basico
+JNJ,Salud
+UNH,Salud
+PFE,Salud
+MRK,Salud
+ABBV,Salud
+TMO,Salud
+JPM,Financieras
+BAC,Financieras
+WFC,Financieras
+GS,Financieras
+MS,Financieras
+AXP,Financieras
+BA,Industriales/Energia/Materiales
+CAT,Industriales/Energia/Materiales
+HON,Industriales/Energia/Materiales
+XOM,Industriales/Energia/Materiales
+CVX,Industriales/Energia/Materiales
+LIN,Industriales/Energia/Materiales
