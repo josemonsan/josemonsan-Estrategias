@@ -7,6 +7,10 @@
         "git+https://github.com/bidouilles/mcp-tradingview-server",
         "mcp-tradingview"
       ]
+    },
+    "pinescript": {
+      "command": "npx",
+      "args": ["-y", "pinescript-mcp-server"]
     }
   }
 }
