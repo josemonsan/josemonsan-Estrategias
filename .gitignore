@@ -33,3 +33,7 @@ htmlcov/
 .DS_Store
 .vscode/
 .idea/
+
+# BTC 6h/1d candles downloaded by macd_sma800_6h_backtest.py fetch
+data/btc/
+macd_sma800_6h_grid.csv

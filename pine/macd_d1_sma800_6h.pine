@@ -10,6 +10,12 @@
 // AVISO: v2 nace de mirar un tramo concreto (oct–nov). Es data snooping:
 // pre-registrar UNA combinación y validarla en otros activos/periodos.
 // Sin lookahead: D1 usa la vela diaria CERRADA anterior.
+//
+// Defaults optimizados para BTC 6H (2026-09-26, ver
+// notes/2026-09-26-macd-sma800-6h-btc-optimization.md):
+//   Solo largos · A (ADX>20) on · S off · P off · Stop 3×ATR D1 · Chandelier 8×ATR D1
+// Elegidos por meseta de robustez (3 feeds BTC + walk-forward), no por el
+// máximo puntual. Siguen siendo in-sample: validar antes de operar.
 // ============================================================================
 strategy("MACD_6h", shorttitle="MACD-SMA800 v2", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.0035, slippage=1, pyramiding=0, process_orders_on_close=false)
 
@@ -20,14 +26,14 @@ macdSlow     = input.int(26, "MACD lenta", group=grpR)
 exitOnRegime = input.bool(true, "Salir si el régimen D1 se apaga", group=grpR)
 
 grpE = "Entrada"
-dirMode = input.string("Ambas", "Dirección", options=["Ambas", "Solo largos", "Solo cortos"], group=grpE)
+dirMode = input.string("Solo largos", "Dirección", options=["Ambas", "Solo largos", "Solo cortos"], group=grpE)
 smaLen  = input.int(800, "SMA (velas del gráfico)", group=grpE)
-useAdx  = input.bool(false, "A · Filtro ADX", group=grpE)
+useAdx  = input.bool(true, "A · Filtro ADX", group=grpE)
 adxLen  = input.int(14, "ADX periodo", group=grpE)
 adxThr  = input.float(20, "ADX mínimo", group=grpE)
 
 grpV = "Mejoras v2"
-useSlope   = input.bool(true, "S · Filtro pendiente SMA", group=grpV)
+useSlope   = input.bool(false, "S · Filtro pendiente SMA", group=grpV)
 slopeLen   = input.int(20, "Pendiente: velas atrás (20 = 5 días en 6H)", group=grpV)
 useAtrD    = input.bool(true, "D · Stop y trail con ATR D1", group=grpV)
 useReentry = input.bool(true, "R · Reentrada por ruptura", group=grpV)
@@ -35,9 +41,9 @@ reLen      = input.int(20, "Ruptura: máx/mín de N velas", group=grpV)
 
 grpX = "Salida"
 atrLen     = input.int(14, "ATR periodo", group=grpX)
-slMult     = input.float(2.0, "Stop inicial (× ATR)", group=grpX)
-chMult     = input.float(3.0, "Chandelier (× ATR)", group=grpX)
-usePartial = input.bool(true, "P · Cierre parcial", group=grpX)
+slMult     = input.float(3.0, "Stop inicial (× ATR)", group=grpX)
+chMult     = input.float(8.0, "Chandelier (× ATR)", group=grpX)
+usePartial = input.bool(false, "P · Cierre parcial", group=grpX)
 partialR   = input.float(2.0, "Parcial a (R)", group=grpX)
 partialPct = input.int(50, "Parcial (%)", minval=1, maxval=99, group=grpX)
 
