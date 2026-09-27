@@ -1,0 +1,234 @@
+//@version=5
+// ============================================================================
+// BTC_Long_6H — versión archivada (2026-09-27) de pine/macd_d1_sma800_6h.pine
+// MACD D1 (régimen) + SMA 800 6H (entrada) + Chandelier ATR (salida) — v2
+// Configuración congelada: ver strategies/BTC_Long_6H/README.md
+//
+// Cambios v2 (cada uno ataca un fallo observado):
+//   S = Filtro de pendiente SMA800 -> no operar con la SMA plana (whipsaw)
+//   D = Stop y trailing con ATR D1 -> unidad de riesgo coherente con el régimen
+//   R = Reentrada por ruptura de N velas -> no perder la tendencia tras un trail
+//
+// AVISO: v2 nace de mirar un tramo concreto (oct–nov). Es data snooping:
+// pre-registrar UNA combinación y validarla en otros activos/periodos.
+// Sin lookahead: D1 usa la vela diaria CERRADA anterior.
+//
+// Defaults optimizados para BTC 6H (2026-09-26, ver
+// notes/2026-09-26-macd-sma800-6h-btc-optimization.md):
+//   Solo largos · A (ADX>20) on · S off · P off · Stop 3×ATR D1 · Chandelier 8×ATR D1
+// Elegidos por meseta de robustez (3 feeds BTC + walk-forward), no por el
+// máximo puntual. Siguen siendo in-sample: validar antes de operar.
+// ============================================================================
+strategy("BTC_Long_6H", shorttitle="BTC_Long_6H", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.0035, slippage=1, pyramiding=0, process_orders_on_close=false)
+
+// ---------------- Inputs ----------------
+grpR = "Régimen D1"
+macdFast     = input.int(12, "MACD rápida", group=grpR)
+macdSlow     = input.int(26, "MACD lenta", group=grpR)
+exitOnRegime = input.bool(true, "Salir si el régimen D1 se apaga", group=grpR)
+holdTrend    = input.bool(false, "H · No salir por régimen si cierre y pendiente SMA siguen a favor", group=grpR,
+     tooltip="Con régimen off, mantiene el largo mientras cierre > SMA y SMA > SMA[pendiente] (espejo en cortos). "
+     + "Captura más las tendencias largas (2024-25) pero el Chandelier pasa a ser la salida real: usar Chandelier 6-8.")
+
+grpE = "Entrada"
+dirMode = input.string("Solo largos", "Dirección", options=["Ambas", "Solo largos", "Solo cortos"], group=grpE)
+smaLen  = input.int(800, "SMA (velas del gráfico)", group=grpE)
+useAdx  = input.bool(true, "A · Filtro ADX", group=grpE)
+adxLen  = input.int(14, "ADX periodo", group=grpE)
+adxThr  = input.float(20, "ADX mínimo", group=grpE)
+
+grpV = "Mejoras v2"
+useSlope   = input.bool(false, "S · Filtro pendiente SMA", group=grpV)
+slopeLen   = input.int(20, "Pendiente: velas atrás (20 = 5 días en 6H)", group=grpV)
+useAtrD    = input.bool(true, "D · Stop y trail con ATR D1", group=grpV)
+useReentry = input.bool(true, "R · Reentrada por ruptura", group=grpV)
+reLen      = input.int(20, "Ruptura: máx/mín de N velas", group=grpV)
+
+grpX = "Salida"
+atrLen     = input.int(14, "ATR periodo", group=grpX)
+slMult     = input.float(3.0, "Stop inicial (× ATR)", group=grpX)
+chMult     = input.float(8.0, "Chandelier (× ATR)", group=grpX)
+usePartial = input.bool(false, "P · Cierre parcial", group=grpX)
+partialR   = input.float(2.0, "Parcial a (R)", group=grpX)
+partialPct = input.int(50, "Parcial (%)", minval=1, maxval=99, group=grpX)
+
+grpC = "Costes y comparación"
+swapL     = input.float(0.0, "Swap largo (% anual, + = coste)", group=grpC)
+swapS     = input.float(0.0, "Swap corto (% anual, + = coste)", group=grpC)
+commBm    = input.float(0.0035, "Comisión % por cambio (benchmark)", group=grpC)
+showD200  = input.bool(true, "Mostrar SMA200 D1 (equivalencia)", group=grpC)
+showMarks = input.bool(true, "Marcar señales descartadas", group=grpC)
+
+// ---------------- Cálculos ----------------
+sma  = ta.sma(close, smaLen)
+atr6 = ta.atr(atrLen)
+[diP, diM, adx] = ta.dmi(adxLen, adxLen)
+
+macdD  = request.security(syminfo.tickerid, "D", (ta.ema(close, macdFast) - ta.ema(close, macdSlow))[1], lookahead=barmerge.lookahead_on)
+smaD   = request.security(syminfo.tickerid, "D", ta.sma(close, 200)[1], lookahead=barmerge.lookahead_on)
+closeD = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+atrD   = request.security(syminfo.tickerid, "D", ta.atr(atrLen)[1], lookahead=barmerge.lookahead_on)
+
+atr = useAtrD ? atrD : atr6
+
+regimeL = macdD > 0
+regimeS = macdD < 0
+adxOK   = not useAdx or adx > adxThr
+slopeL  = not useSlope or sma > sma[slopeLen]
+slopeS  = not useSlope or sma < sma[slopeLen]
+allowL  = dirMode != "Solo cortos"
+allowS  = dirMode != "Solo largos"
+
+trendUp = close > sma and sma > sma[slopeLen]
+trendDn = close < sma and sma < sma[slopeLen]
+
+crossUp = ta.crossover(close, sma)
+crossDn = ta.crossunder(close, sma)
+hiBrk   = close > ta.highest(high, reLen)[1]
+loBrk   = close < ta.lowest(low, reLen)[1]
+
+trigL = crossUp or (useReentry and close > sma and hiBrk)
+trigS = crossDn or (useReentry and close < sma and loBrk)
+
+baseL = trigL and regimeL and allowL and strategy.position_size <= 0
+baseS = trigS and regimeS and allowS and strategy.position_size >= 0
+
+entryL = baseL and slopeL and adxOK
+entryS = baseS and slopeS and adxOK
+
+blockedSlope  = (baseL and not slopeL) or (baseS and not slopeS)
+blockedAdx    = ((baseL and slopeL) or (baseS and slopeS)) and not adxOK
+againstRegime = (crossUp and allowL and not regimeL) or (crossDn and allowS and not regimeS)
+
+// ---------------- Estado de posición ----------------
+var float riskL = na
+var float trailL = na
+var float tpL = na
+var float hh = na
+var bool tpDoneL = false
+
+var float riskS = na
+var float trailS = na
+var float tpS = na
+var float ll = na
+var bool tpDoneS = false
+
+if entryL
+    strategy.entry("L", strategy.long, comment=crossUp ? "L cruce" : "L ruptura")
+    riskL   := slMult * atr
+    trailL  := close - riskL
+    tpL     := close + partialR * riskL
+    hh      := close
+    tpDoneL := false
+
+if entryS
+    strategy.entry("S", strategy.short, comment=crossDn ? "S cruce" : "S ruptura")
+    riskS   := slMult * atr
+    trailS  := close + riskS
+    tpS     := close - partialR * riskS
+    ll      := close
+    tpDoneS := false
+
+posL = strategy.position_size > 0
+posS = strategy.position_size < 0
+
+if posL
+    if usePartial and high >= tpL
+        tpDoneL := true
+    if strategy.position_size[1] <= 0
+        avg = strategy.position_avg_price
+        trailL := avg - riskL
+        tpL    := avg + partialR * riskL
+        hh     := high
+    else
+        hh := math.max(hh, high)
+    trailL := math.max(trailL, hh - chMult * atr)
+
+if posS
+    if usePartial and low <= tpS
+        tpDoneS := true
+    if strategy.position_size[1] >= 0
+        avg = strategy.position_avg_price
+        trailS := avg + riskS
+        tpS    := avg - partialR * riskS
+        ll     := low
+    else
+        ll := math.min(ll, low)
+    trailS := math.min(trailS, ll + chMult * atr)
+
+if entryL or posL
+    if usePartial and not tpDoneL
+        strategy.exit("L-TP", "L", qty_percent=partialPct, limit=tpL, stop=trailL, comment="TP/Stop")
+    strategy.exit("L-TS", "L", stop=trailL, comment="Trail")
+
+if entryS or posS
+    if usePartial and not tpDoneS
+        strategy.exit("S-TP", "S", qty_percent=partialPct, limit=tpS, stop=trailS, comment="TP/Stop")
+    strategy.exit("S-TS", "S", stop=trailS, comment="Trail")
+
+if exitOnRegime and posL and not regimeL and not (holdTrend and trendUp) and not entryS
+    strategy.close("L", comment="Régimen off")
+if exitOnRegime and posS and not regimeS and not (holdTrend and trendDn) and not entryL
+    strategy.close("S", comment="Régimen off")
+
+// ---------------- Swap estimado ----------------
+barDays = timeframe.in_seconds(timeframe.period) / 86400.0
+var float swapCost = 0.0
+if strategy.position_size != 0
+    notional = math.abs(strategy.position_size) * close * syminfo.pointvalue
+    rate = strategy.position_size > 0 ? swapL : swapS
+    swapCost += notional * rate / 100 * barDays / 365
+
+// ---------------- Drawdown de equity ----------------
+var float peak = strategy.initial_capital
+var float maxDD = 0.0
+peak  := math.max(peak, strategy.equity)
+maxDD := math.max(maxDD, (peak - strategy.equity) / peak)
+
+// ---------------- Benchmark: largo/plano cierre D1 > SMA200 D1 ----------------
+bmIn = not na(smaD) and closeD > smaD
+var float bm = 1.0
+if bmIn[1]
+    bm *= close / close[1]
+    bm *= 1 - swapL / 100 * barDays / 365
+if bar_index > 0 and bmIn != bmIn[1]
+    bm *= 1 - commBm / 100
+
+// ---------------- Gráfico ----------------
+plot(sma, "SMA 800", color=color.orange, linewidth=2)
+plot(showD200 ? smaD : na, "SMA200 D1", color=color.new(color.gray, 30), style=plot.style_stepline)
+bgcolor(regimeL ? color.new(color.green, 92) : regimeS ? color.new(color.red, 92) : na, title="Régimen D1")
+
+plot(posL ? trailL : na, "Stop largo", color=color.red, style=plot.style_linebr)
+plot(posL and usePartial and not tpDoneL ? tpL : na, "TP largo", color=color.teal, style=plot.style_linebr)
+plot(posS ? trailS : na, "Stop corto", color=color.red, style=plot.style_linebr)
+plot(posS and usePartial and not tpDoneS ? tpS : na, "TP corto", color=color.teal, style=plot.style_linebr)
+
+plotshape(showMarks and blockedSlope, "Bloqueada: SMA plana", shape.diamond, location.abovebar, color.yellow, size=size.tiny)
+plotshape(showMarks and blockedAdx, "Bloqueada: ADX", shape.xcross, location.abovebar, color.gray, size=size.tiny)
+plotshape(showMarks and againstRegime, "Cruce contra régimen", shape.circle, location.belowbar, color.silver, size=size.tiny)
+
+// ---------------- Tabla ----------------
+var table tb = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 15), border_width=1)
+f_row(r, k, v) =>
+    table.cell(tb, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(tb, 1, r, v, text_color=color.white, text_size=size.small, text_halign=text.align_right)
+
+if barstate.islast
+    ic  = strategy.initial_capital
+    ct  = strategy.closedtrades
+    net = strategy.netprofit / ic * 100
+    sw  = swapCost / ic * 100
+    wr  = ct > 0 ? strategy.wintrades / ct * 100 : na
+    pf  = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    tag = (usePartial ? "P" : "·") + (useAdx ? "A" : "·") + (useSlope ? "S" : "·") + (useAtrD ? "D" : "·") + (useReentry ? "R" : "·") + (holdTrend ? "H" : "·")
+    f_row(0, "Variante (PASDRH)", tag)
+    f_row(1, "Operaciones (parciales cuentan)", str.tostring(ct))
+    f_row(2, "Neto %", str.tostring(net, "#.##"))
+    f_row(3, "Swap estimado %", str.tostring(-sw, "#.##"))
+    f_row(4, "Neto − swap %", str.tostring(net - sw, "#.##"))
+    f_row(5, "Win rate %", str.tostring(wr, "#.#"))
+    f_row(6, "Profit factor", str.tostring(pf, "#.##"))
+    f_row(7, "Max DD equity %", str.tostring(maxDD * 100, "#.##"))
+    f_row(8, "Bench SMA200 D1 L/F %", str.tostring((bm - 1) * 100, "#.##"))
+    f_row(9, "Timeframe", timeframe.period == "360" ? "6H ✓" : "⚠ Diseñada para 6H")
