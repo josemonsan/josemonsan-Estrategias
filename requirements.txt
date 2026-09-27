@@ -3,3 +3,5 @@
 numpy
 pandas
 yfinance
+# lxml: only for sp500_optimize.py fetch (reads the S&P 500 list from Wikipedia)
+lxml
