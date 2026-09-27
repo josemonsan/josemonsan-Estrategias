@@ -24,6 +24,9 @@ grpR = "Régimen D1"
 macdFast     = input.int(12, "MACD rápida", group=grpR)
 macdSlow     = input.int(26, "MACD lenta", group=grpR)
 exitOnRegime = input.bool(true, "Salir si el régimen D1 se apaga", group=grpR)
+holdTrend    = input.bool(false, "H · No salir por régimen si cierre y pendiente SMA siguen a favor", group=grpR,
+     tooltip="Con régimen off, mantiene el largo mientras cierre > SMA y SMA > SMA[pendiente] (espejo en cortos). "
+     + "Captura más las tendencias largas (2024-25) pero el Chandelier pasa a ser la salida real: usar Chandelier 6-8.")
 
 grpE = "Entrada"
 dirMode = input.string("Solo largos", "Dirección", options=["Ambas", "Solo largos", "Solo cortos"], group=grpE)
@@ -73,6 +76,9 @@ slopeL  = not useSlope or sma > sma[slopeLen]
 slopeS  = not useSlope or sma < sma[slopeLen]
 allowL  = dirMode != "Solo cortos"
 allowS  = dirMode != "Solo largos"
+
+trendUp = close > sma and sma > sma[slopeLen]
+trendDn = close < sma and sma < sma[slopeLen]
 
 crossUp = ta.crossover(close, sma)
 crossDn = ta.crossunder(close, sma)
@@ -158,9 +164,9 @@ if entryS or posS
         strategy.exit("S-TP", "S", qty_percent=partialPct, limit=tpS, stop=trailS, comment="TP/Stop")
     strategy.exit("S-TS", "S", stop=trailS, comment="Trail")
 
-if exitOnRegime and posL and not regimeL and not entryS
+if exitOnRegime and posL and not regimeL and not (holdTrend and trendUp) and not entryS
     strategy.close("L", comment="Régimen off")
-if exitOnRegime and posS and not regimeS and not entryL
+if exitOnRegime and posS and not regimeS and not (holdTrend and trendDn) and not entryL
     strategy.close("S", comment="Régimen off")
 
 // ---------------- Swap estimado ----------------
@@ -213,8 +219,8 @@ if barstate.islast
     sw  = swapCost / ic * 100
     wr  = ct > 0 ? strategy.wintrades / ct * 100 : na
     pf  = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
-    tag = (usePartial ? "P" : "·") + (useAdx ? "A" : "·") + (useSlope ? "S" : "·") + (useAtrD ? "D" : "·") + (useReentry ? "R" : "·")
-    f_row(0, "Variante (PASDR)", tag)
+    tag = (usePartial ? "P" : "·") + (useAdx ? "A" : "·") + (useSlope ? "S" : "·") + (useAtrD ? "D" : "·") + (useReentry ? "R" : "·") + (holdTrend ? "H" : "·")
+    f_row(0, "Variante (PASDRH)", tag)
     f_row(1, "Operaciones (parciales cuentan)", str.tostring(ct))
     f_row(2, "Neto %", str.tostring(net, "#.##"))
     f_row(3, "Swap estimado %", str.tostring(-sw, "#.##"))

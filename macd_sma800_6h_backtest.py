@@ -194,7 +194,7 @@ def features(h6, d1, smaLen=800, adxLen=14, atrLen=14, slopeLen=20, reLen=20, ma
 @njit(cache=True)
 def _run(o, h, l, c, sma, atr, adxv, macdD, smaPrev, hiRe, loRe, tradeStart,
          slMult, chMult, useAdx, adxThr, useSlope, useReentry, exitOnRegime, dirMode,
-         comm, slip, cap):
+         holdTrend, comm, slip, cap):
     n = len(c)
     pos = 0.0; avg = 0.0; cash = cap; prevPos = 0.0
     pend = 0; pendQty = 0.0          # pend: 1 largo, -1 corto, 2 cerrar
@@ -277,14 +277,18 @@ def _run(o, h, l, c, sma, atr, adxv, macdD, smaPrev, hiRe, loRe, tradeStart,
             stopL = trailL
         if entryS or pos < 0:
             stopS = trailS
-        if exitOnRegime and ((pos > 0 and not regL and not entryS) or (pos < 0 and not regS and not entryL)):
+        # H: con régimen off, mantener mientras el precio siga del lado bueno de una SMA con pendiente a favor
+        keepL = holdTrend and c[i] > sma[i] and sma[i] > smaPrev[i]
+        keepS = holdTrend and c[i] < sma[i] and sma[i] < smaPrev[i]
+        if exitOnRegime and ((pos > 0 and not regL and not keepL and not entryS) or
+                             (pos < 0 and not regS and not keepS and not entryL)):
             pend = 2
         prevPos = pos
     return eq, pnl[:ntr], ent[:ntr], ext[:ntr], side[:ntr]
 
 
 DEFAULTS = dict(smaLen=800, adxLen=14, slopeLen=20, reLen=20, sl=3.0, ch=8.0, adx=True, adxThr=20.0,
-                slope=False, reentry=True, atrD=True, regExit=True, dir="long")
+                slope=False, reentry=True, atrD=True, regExit=True, dir="long", hold=False)
 DIRS = {"both": 0, "long": 1, "short": 2}
 
 
@@ -309,7 +313,7 @@ class Backtester:
         eq, pnl, ent, ext, side = _run(
             a("o"), a("h"), a("l"), a("c"), a("sma"), a("atrD") if p["atrD"] else a("atr6"), a("adx"),
             a("macdD"), a("smaPrev"), a("hiRe"), a("loRe"), ts, p["sl"], p["ch"], p["adx"], p["adxThr"],
-            p["slope"], p["reentry"], p["regExit"], DIRS[p["dir"]], 0.0035 / 100, 0.01, cap)
+            p["slope"], p["reentry"], p["regExit"], DIRS[p["dir"]], p["hold"], 0.0035 / 100, 0.01, cap)
         e = eq[ts:]
         dd = ((np.maximum.accumulate(e) - e) / np.maximum.accumulate(e)).max() * 100
         net = (e[-1] / cap - 1) * 100
