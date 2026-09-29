@@ -18,6 +18,14 @@
 // AVISO: v2 ya está optimizada in-sample sobre BTC 6H. Añadir módulos sobre los
 // mismos datos suma pruebas: contarlas todas en el DSR y validar fuera de muestra.
 // Sin lookahead: D1 usa la vela diaria CERRADA anterior.
+//
+// Barrido BTCUSDT 6H 2018-2026 (btc/optimize_v3.py, 18.316 combinaciones; ver
+// notes/2026-09-29-btc-6h-v3-oscillator-optimization.md):
+//   M: redundante (cruce SMA800 / ruptura de 20 velas ya implican RSI > 50). Dejar OFF.
+//   O: empeora en las 30 combinaciones, IS y OOS (retrasa las mejores entradas). Dejar OFF.
+//   K: 14/3/20 empeora (DD 42 %). Solo 28/5/10 mejora algo (+2 operaciones en 2019,
+//      DD 35,6 → 31,3 %), sin operaciones pullback en 2023-26 → no validado OOS.
+//      Defaults de K cambiados a 28/5/10; K sigue apagado.
 // ============================================================================
 strategy("MACD_6h_v3", shorttitle="MACD-SMA800 v3", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.0035, slippage=1, pyramiding=0, process_orders_on_close=false)
 
@@ -51,9 +59,9 @@ rsiMin     = input.float(50, "RSI mínimo largos (cortos: 100 − x)", minval=0,
 useRsiCap  = input.bool(false, "O · RSI techo (no perseguir)", group=grpO)
 rsiMax     = input.float(75, "RSI máximo largos (cortos: 100 − x)", minval=0, maxval=100, group=grpO)
 useStochPb = input.bool(false, "K · Reentrada pullback estocástico", group=grpO)
-stLen      = input.int(14, "Estocástico %K periodo", group=grpO)
-stSmooth   = input.int(3, "Estocástico %K suavizado", group=grpO)
-stOS       = input.float(20, "Sobreventa largos (cortos: 100 − x)", minval=1, maxval=50, group=grpO)
+stLen      = input.int(28, "Estocástico %K periodo", group=grpO)
+stSmooth   = input.int(5, "Estocástico %K suavizado", group=grpO)
+stOS       = input.float(10, "Sobreventa largos (cortos: 100 − x)", minval=1, maxval=50, group=grpO)
 
 grpX = "Salida"
 atrLen     = input.int(14, "ATR periodo", group=grpX)

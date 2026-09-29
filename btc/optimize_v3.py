@@ -16,7 +16,7 @@ Cada combinación se corre una vez sobre todo el histórico y se mide en:
     y en 4 bloques: 2018-20, 2021-22, 2023-24, 2025-26.
 
 Uso:
-    python3 btc/optimize_v3.py [--out btc/results/grid_v3.csv] [--procs 4]
+    python3 btc/optimize_v3.py [--out btc/results/grid_v3.csv.gz] [--procs 4]
 """
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def evaluate(p: P) -> dict:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(Path(__file__).resolve().parent / "results" / "grid_v3.csv"))
+    ap.add_argument("--out", default=str(Path(__file__).resolve().parent / "results" / "grid_v3.csv.gz"))
     ap.add_argument("--procs", type=int, default=4)
     a = ap.parse_args()
     g = grid()

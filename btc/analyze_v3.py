@@ -1,7 +1,7 @@
 """
 analyze_v3.py
 =======================================================================
-Resume btc/results/grid_v3.csv (salida de optimize_v3.py):
+Resume btc/results/grid_v3.csv.gz (salida de optimize_v3.py):
   1. Baseline (v3 con todo apagado == v2).
   2. Cada módulo aislado (M, O, K) por parámetro, IS vs OOS.
   3. Selección por IS y su resultado OOS; correlación de rangos IS→OOS.
@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-R = Path(__file__).resolve().parent / "results" / "grid_v3.csv"
+R = Path(__file__).resolve().parent / "results" / "grid_v3.csv.gz"
 pd.set_option("display.width", 220)
 pd.set_option("display.max_columns", 40)
 
