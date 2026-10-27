@@ -1,0 +1,7 @@
+pandas>=2.1
+numpy
+scipy
+plotly
+ccxt
+google-cloud-bigquery
+db-dtypes

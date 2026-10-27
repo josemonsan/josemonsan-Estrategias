@@ -1,0 +1,4 @@
+# Lista corta de direcciones de exchanges (hot/cold wallets) en minúsculas.
+# Rellénala desde las etiquetas públicas de Etherscan. Ojo: las etiquetas se añaden
+# a posteriori, así que pueden introducir sesgo de anticipación en el backtest.
+address,exchange
