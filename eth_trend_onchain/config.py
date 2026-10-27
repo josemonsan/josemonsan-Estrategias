@@ -5,13 +5,16 @@ Congela este archivo (y GRID) ANTES de mirar resultados fuera de muestra.
 Cada combinación del GRID y cada variante (con / sin on-chain) cuenta como
 un trial para el Deflated Sharpe Ratio.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Tuple
 
 
 @dataclass(frozen=True)
 class StrategyParams:
     # --- Señal de tendencia (en barras del timeframe que cargues) ---
+    # Estos son los valores del preset "1d" (ver STRATEGY_PARAMS_4H y PRESETS más abajo
+    # para el preset "4h" y cómo se elige uno u otro).
+    #
     # Reoptimizado 2026-10 sobre ETH/USDT 1d (2017-08→2026-10, binance spot) para batir
     # buy&hold en retorno total manteniendo max_DD <= criterio EvalParams.max_dd.
     # Aviso: se barrieron ~4300 combinaciones sobre un único tramo histórico, así que
@@ -33,6 +36,30 @@ class StrategyParams:
 
     allow_shorts: bool = False     # los cortos lastraban el retorno en el sesgo alcista de ETH
     use_onchain: bool = True       # variante B (con on-chain) vs A (sin)
+
+
+# Preset "4h": reoptimizado 2026-10 sobre ETH/USDT 4h (binance spot, mismo rango de
+# fechas). Mismo aviso de overfitting que arriba: ~4300 combos barridos sobre un único
+# tramo histórico en barras de 4h. Backtest 2017-08→2026-10: retorno_total 12299.6% vs
+# 662.4% buy&hold, max_DD -58.7% vs -94.1% (dentro del criterio del 60%).
+STRATEGY_PARAMS_4H = replace(
+    StrategyParams(),
+    sma_regime=100, donchian_entry=60, donchian_exit=60,
+    stop_atr=3.0, add_step_atr=0.5, max_units=6,
+    risk_per_unit=0.0125, max_leverage=5.0,
+)
+
+# Selección de preset por timeframe. main.py elige automáticamente el preset cuyo
+# timeframe nominal esté más cerca de las horas por barra de los datos cargados
+# (ver params_for_bar_hours). Para añadir un preset nuevo: crear la variante con
+# replace(StrategyParams(), ...) y añadirla aquí con su timeframe nominal en horas.
+PRESETS = {"1d": StrategyParams(), "4h": STRATEGY_PARAMS_4H}
+PRESET_HOURS = {"1d": 24.0, "4h": 4.0}
+
+
+def params_for_bar_hours(hours: float) -> StrategyParams:
+    key = min(PRESET_HOURS, key=lambda k: abs(PRESET_HOURS[k] - hours))
+    return PRESETS[key]
 
 
 @dataclass(frozen=True)

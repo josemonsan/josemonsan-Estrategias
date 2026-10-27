@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from config import GRID, CostParams, EvalParams, OnchainParams, StrategyParams
+from config import GRID, CostParams, EvalParams, OnchainParams, params_for_bar_hours
 from data import (bar_delta, fetch_ohlcv_ccxt, funding_per_bar, load_funding_csv,
                   load_ohlcv_csv)
 from metrics import buy_hold, perf, walkforward
@@ -95,13 +95,14 @@ def run_ab(df, base, cost, ev):
 
 def cmd_backtest(a):
     op, cost, ev = OnchainParams(), CostParams(), EvalParams()
-    base = StrategyParams()
     df, _ = prepare(a.prices, a.onchain, a.funding, op, a.start, a.end)
+    td = bar_delta(df.index)
+    base = params_for_bar_hours(td / pd.Timedelta(hours=1))
     results = run_ab(df, base, cost, ev)
     bh = buy_hold(df["close"], ev.initial_equity)
     table = {name: fmt(perf(r.equity, r.trades, r.exposure)) for name, r in results.items()}
     table["buy_hold"] = fmt(perf(bh))
-    print(f"\nETH {df.index[0]:%Y-%m-%d} → {df.index[-1]:%Y-%m-%d} | barras: {bar_delta(df.index)}")
+    print(f"\nETH {df.index[0]:%Y-%m-%d} → {df.index[-1]:%Y-%m-%d} | barras: {td}")
     order = list(next(iter(table.values())).index)
     print(pd.DataFrame(table).reindex(order).fillna("").to_string())
     for name, r in results.items():
@@ -124,8 +125,9 @@ def cmd_backtest(a):
 def cmd_walkforward(a):
     op, cost, ev = OnchainParams(), CostParams(), EvalParams()
     df, _ = prepare(a.prices, a.onchain, a.funding, op, a.start, a.end)
+    base = params_for_bar_hours(bar_delta(df.index) / pd.Timedelta(hours=1))
     variants = (False, True) if "oc_alert" in df else (False,)
-    wf = walkforward(df, StrategyParams(), GRID, cost, ev, variants)
+    wf = walkforward(df, base, GRID, cost, ev, variants)
     for label, t in wf["folds"].items():
         print(f"\n=== {label} ===")
         print(t.to_string(index=False, float_format=lambda x: f"{x:.1%}"))
