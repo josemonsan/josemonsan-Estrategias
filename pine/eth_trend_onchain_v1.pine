@@ -1,0 +1,224 @@
+//@version=5
+// ============================================================================
+// ETH trend-following + Tortugas (sin on-chain) — v1
+//
+// Traducción a Pine del motor de eth_trend_onchain/strategy.py para verificación
+// visual en el gráfico nativo de TradingView (entradas/salidas/piramidación/stop
+// marcados automáticamente por el framework de estrategias + Strategy Tester).
+//
+// Presets (ver eth_trend_onchain/config.py, StrategyParams y STRATEGY_PARAMS_4H):
+//   1d: sma_regime=50  donchian_entry/exit=10  stop_atr=2.0  add_step_atr=0.5
+//       max_units=4  risk_per_unit=0.02  max_leverage=5x  sin cortos
+//       Backtest 2017-08→2026-10 (binance ETH/USDT 1d): retorno_total 2450.3%
+//       vs 669.7% buy&hold, max_DD -51.6% vs -94.0%.
+//   4h: sma_regime=100 donchian_entry/exit=60  stop_atr=3.0  add_step_atr=0.5
+//       max_units=6  risk_per_unit=0.0125 max_leverage=5x  sin cortos
+//       Backtest 2017-08→2026-10 (binance ETH/USDT 4h): retorno_total 12299.6%
+//       vs 662.4% buy&hold, max_DD -58.7% vs -94.1%.
+//
+// Carga el gráfico BINANCE:ETHUSDT en 1D o 4H según el preset elegido (la tabla
+// de abajo avisa si no coinciden). Variante "A_sin_onchain" únicamente: la alerta
+// on-chain (BigQuery) solo existe en el script de Python, no se replica aquí.
+//
+// AVISO DE OVERFITTING (igual que en config.py): ambos presets salen de barrer
+// ~4300 combinaciones de parámetros sobre un único tramo histórico de ETH. Parte
+// de la ventaja sobre buy&hold puede ser ajuste a esta trayectoria concreta de
+// precios, no alfa real. Usa este script para INSPECCIONAR visualmente los
+// trades, no como prueba adicional de robustez.
+//
+// Diferencias mecánicas frente a strategy.py (inherentes a cómo Pine resuelve
+// órdenes, no bugs):
+//   - Pine difiere toda orden (incluidas las de stop/pirámide) al menos una
+//     barra respecto al momento en que se cumple la condición que la genera;
+//     strategy.py permite que un stop o un añadido disparado en la barra i se
+//     ejecute dentro de esa misma barra i. El resultado puede llegar con un
+//     desfase de una barra frente al motor de Python.
+//   - El tamaño de cada unidad usa strategy.equity / ATR de la barra anterior
+//     a la señal (igual que equity[i-1]/atr[i-1] en Python), pero sin el
+//     marcado a mercado intrabarra que usa Python para los añadidos.
+//   - Sin funding ni slippage explícitos (comentados abajo); solo comisión %.
+// ============================================================================
+strategy("ETH Trend+Turtle (1d/4h)", shorttitle="ETH-Trend", overlay=true,
+     initial_capital=10000, currency=currency.USD,
+     default_qty_type=strategy.fixed, default_qty_value=0,
+     commission_type=strategy.commission.percent, commission_value=0.1,
+     slippage=0, pyramiding=8, process_orders_on_close=false)
+
+// ---------------- Preset ----------------
+grpP = "Preset"
+presetSel = input.string("1d", "Preset", options=["1d", "4h", "Manual"], group=grpP,
+     tooltip="1d y 4h cargan los parámetros reoptimizados de config.py. Manual usa los inputs de abajo (máx. 8 unidades por el límite de pyramiding de este script).")
+
+grpS = "Señal de tendencia — solo si Preset = Manual (en barras del timeframe del gráfico)"
+smaRegimeIn     = input.int(50, "SMA régimen", minval=2, group=grpS)
+donchianEntryIn = input.int(10, "Donchian entrada", minval=2, group=grpS)
+donchianExitIn  = input.int(10, "Donchian salida", minval=2, group=grpS)
+
+grpR = "Riesgo y piramidación — solo si Preset = Manual"
+stopAtrIn     = input.float(2.0, "Stop (x ATR)", minval=0.1, group=grpR)
+addStepAtrIn  = input.float(0.5, "Paso piramidación (x ATR)", minval=0.1, group=grpR)
+maxUnitsIn    = input.int(4, "Unidades máx (≤ 8)", minval=1, maxval=8, group=grpR)
+riskPerUnitIn = input.float(0.02, "Riesgo por unidad (fracción, 0.02 = 2%)", minval=0.001, step=0.0025, group=grpR)
+maxLeverageIn = input.float(5.0, "Leverage máx (nocional/equity)", minval=1.0, group=grpR)
+allowShortsIn = input.bool(false, "Permitir cortos", group=grpR)
+
+grpC = "Común a los dos presets"
+atrLen = input.int(20, "ATR periodo (Tortugas)", minval=2, group=grpC)
+
+grpV = "Visual"
+showBands = input.bool(true, "Mostrar bandas Donchian/SMA", group=grpV)
+
+// ---------------- Resolución del preset ----------------
+isP1d = presetSel == "1d"
+isP4h = presetSel == "4h"
+
+smaRegime     = isP1d ? 50  : isP4h ? 100 : smaRegimeIn
+donchianEntry = isP1d ? 10  : isP4h ? 60  : donchianEntryIn
+donchianExit  = isP1d ? 10  : isP4h ? 60  : donchianExitIn
+stopAtr       = isP1d ? 2.0 : isP4h ? 3.0 : stopAtrIn
+addStepAtr    = isP1d ? 0.5 : isP4h ? 0.5 : addStepAtrIn
+maxUnits      = isP1d ? 4   : isP4h ? 6   : maxUnitsIn
+riskPerUnit   = isP1d ? 0.02 : isP4h ? 0.0125 : riskPerUnitIn
+maxLeverage   = isP1d ? 5.0 : isP4h ? 5.0 : maxLeverageIn
+allowShorts   = presetSel == "Manual" ? allowShortsIn : false
+
+// ---------------- Indicadores ----------------
+sma  = ta.sma(close, smaRegime)
+atr  = ta.atr(atrLen)
+hhIn = ta.highest(high, donchianEntry)[1]
+llIn = ta.lowest(low, donchianEntry)[1]
+hhEx = ta.highest(high, donchianExit)[1]
+llEx = ta.lowest(low, donchianExit)[1]
+
+warm = not na(sma) and not na(atr) and not na(hhIn) and not na(llIn) and not na(hhEx) and not na(llEx)
+
+// ---------------- Estado (unidades, stop, piramidación) ----------------
+var int   side          = 0     // 1 largo, -1 corto, 0 plano
+var int   unitsCount    = 0
+var float lastFillPrice = na
+var float lastFillAtr   = na
+var float stopLevel     = na
+var float addTrigL      = na
+var float addTrigS      = na
+
+flat  = strategy.position_size == 0
+posL  = strategy.position_size > 0
+posS  = strategy.position_size < 0
+
+prevFlat = strategy.position_size[1] == 0
+prevPosL = strategy.position_size[1] > 0
+prevPosS = strategy.position_size[1] < 0
+
+// --- detectar fills de órdenes puestas en la barra anterior ---
+if posL and prevFlat
+    side          := 1
+    unitsCount    := 1
+    lastFillAtr   := atr[1]
+    lastFillPrice := strategy.position_avg_price
+    stopLevel     := lastFillPrice - stopAtr * lastFillAtr
+else if posS and prevFlat
+    side          := -1
+    unitsCount    := 1
+    lastFillAtr   := atr[1]
+    lastFillPrice := strategy.position_avg_price
+    stopLevel     := lastFillPrice + stopAtr * lastFillAtr
+else if posL and prevPosL and strategy.position_size > strategy.position_size[1]
+    unitsCount    := math.min(unitsCount + 1, maxUnits)
+    lastFillAtr   := atr[1]
+    lastFillPrice := addTrigL
+    stopLevel     := math.max(stopLevel, lastFillPrice - stopAtr * lastFillAtr)
+else if posS and prevPosS and math.abs(strategy.position_size) > math.abs(strategy.position_size[1])
+    unitsCount    := math.min(unitsCount + 1, maxUnits)
+    lastFillAtr   := atr[1]
+    lastFillPrice := addTrigS
+    stopLevel     := math.min(stopLevel, lastFillPrice + stopAtr * lastFillAtr)
+else if flat
+    side          := 0
+    unitsCount    := 0
+    lastFillPrice := na
+    lastFillAtr   := na
+    stopLevel     := na
+
+// ---------------- Entradas (unidad 1) ----------------
+canEnterLong  = warm and flat and close > hhIn and close > sma
+canEnterShort = warm and allowShorts and flat and close < llIn and close < sma
+
+if canEnterLong
+    qty0 = math.min(riskPerUnit * strategy.equity / (stopAtr * atr), maxLeverage * strategy.equity / close)
+    if qty0 > 0
+        strategy.entry("L", strategy.long, qty=qty0, comment="entrada")
+
+if canEnterShort
+    qty0s = math.min(riskPerUnit * strategy.equity / (stopAtr * atr), maxLeverage * strategy.equity / close)
+    if qty0s > 0
+        strategy.entry("S", strategy.short, qty=qty0s, comment="entrada")
+
+// ---------------- Piramidación (órdenes stop, se reemiten cada barra) ----------------
+if posL and unitsCount < maxUnits
+    addTrigL := lastFillPrice + addStepAtr * lastFillAtr
+    addQtyL  = math.max(0.0, math.min(riskPerUnit * strategy.equity / (stopAtr * atr),
+         maxLeverage * strategy.equity / close - math.abs(strategy.position_size)))
+    if addQtyL > 0
+        strategy.entry("Ladd", strategy.long, qty=addQtyL, stop=addTrigL, comment="pirámide")
+    else
+        strategy.cancel("Ladd")
+else
+    strategy.cancel("Ladd")
+
+if posS and unitsCount < maxUnits
+    addTrigS := lastFillPrice - addStepAtr * lastFillAtr
+    addQtyS  = math.max(0.0, math.min(riskPerUnit * strategy.equity / (stopAtr * atr),
+         maxLeverage * strategy.equity / close - math.abs(strategy.position_size)))
+    if addQtyS > 0
+        strategy.entry("Sadd", strategy.short, qty=addQtyS, stop=addTrigS, comment="pirámide")
+    else
+        strategy.cancel("Sadd")
+else
+    strategy.cancel("Sadd")
+
+// ---------------- Stop común (solo se mueve a favor) ----------------
+if posL
+    strategy.exit("L-Stop", "L", stop=stopLevel, comment="stop")
+if posS
+    strategy.exit("S-Stop", "S", stop=stopLevel, comment="stop")
+
+// ---------------- Salida Donchian ----------------
+if posL and warm and close < llEx
+    strategy.close("L", comment="salida donchian")
+    strategy.cancel("Ladd")
+if posS and warm and close > hhEx
+    strategy.close("S", comment="salida donchian")
+    strategy.cancel("Sadd")
+
+// ---------------- Gráfico ----------------
+plot(sma, "SMA régimen", color=color.orange, linewidth=2)
+plot(showBands ? hhIn : na, "Donchian entrada (alto)", color=color.new(color.teal, 60), style=plot.style_stepline)
+plot(showBands ? llIn : na, "Donchian entrada (bajo)", color=color.new(color.teal, 60), style=plot.style_stepline)
+plot(showBands and posL ? llEx : showBands and posS ? hhEx : na, "Donchian salida", color=color.new(color.fuchsia, 40), style=plot.style_stepline)
+plot(posL or posS ? stopLevel : na, "Stop", color=color.red, linewidth=2, style=plot.style_linebr)
+bgcolor(posL ? color.new(color.green, 92) : posS ? color.new(color.red, 92) : na, title="Posición")
+
+// ---------------- Drawdown de equity ----------------
+var float peak  = strategy.initial_capital
+var float maxDD = 0.0
+peak  := math.max(peak, strategy.equity)
+maxDD := math.max(maxDD, (peak - strategy.equity) / peak)
+
+// ---------------- Tabla ----------------
+var table tb = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 15), border_width=1)
+f_row(r, k, v) =>
+    table.cell(tb, 0, r, k, text_color=color.white, text_size=size.small, text_halign=text.align_left)
+    table.cell(tb, 1, r, v, text_color=color.white, text_size=size.small, text_halign=text.align_right)
+
+if barstate.islast
+    tfIsDaily = timeframe.period == "D" or timeframe.period == "1D"
+    tfIs4h    = timeframe.period == "240"
+    tfOK = (isP1d and tfIsDaily) or (isP4h and tfIs4h) or presetSel == "Manual"
+    f_row(0, "Preset", presetSel)
+    f_row(1, "sma_regime / donchian_entry / exit", str.tostring(smaRegime) + " / " + str.tostring(donchianEntry) + " / " + str.tostring(donchianExit))
+    f_row(2, "stop_atr / add_step_atr / max_units", str.tostring(stopAtr) + " / " + str.tostring(addStepAtr) + " / " + str.tostring(maxUnits))
+    f_row(3, "risk_per_unit / max_leverage", str.tostring(riskPerUnit) + " / " + str.tostring(maxLeverage) + "x")
+    f_row(4, "allow_shorts", allowShorts ? "sí" : "no")
+    f_row(5, "Unidades abiertas", str.tostring(unitsCount) + " / " + str.tostring(maxUnits))
+    f_row(6, "Timeframe gráfico", timeframe.period + (tfOK ? " ✓" : " ⚠ no coincide con el preset"))
+    f_row(7, "Max DD equity %", str.tostring(maxDD * 100, "#.##"))

@@ -48,6 +48,7 @@ Funding real: `--funding funding.csv` (columnas `time, rate`). Sin él se usa 0,
 | `strategy.py` | Motor de backtest barra a barra |
 | `metrics.py` | Métricas, DSR (Bailey–López de Prado), walk-forward |
 | `report.py` | HTML Plotly: precio y operaciones, equity log, drawdown, compuesto on-chain |
+| `../pine/eth_trend_onchain_v1.pine` | Traducción a Pine (TradingView) para verificación visual de entradas/salidas/piramidación; carga el preset 1d o 4h reoptimizado (sin on-chain) |
 
 ## Supuestos a conocer
 
