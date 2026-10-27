@@ -12,20 +12,26 @@ from typing import Tuple
 @dataclass(frozen=True)
 class StrategyParams:
     # --- Señal de tendencia (en barras del timeframe que cargues) ---
-    sma_regime: int = 200          # régimen: largo solo sobre la SMA, corto solo debajo
-    donchian_entry: int = 20       # ruptura del máximo/mínimo de las N barras previas
-    donchian_exit: int = 20        # salida normal; con alerta on-chain se usa la mitad
+    # Reoptimizado 2026-10 sobre ETH/USDT 1d (2017-08→2026-10, binance spot) para batir
+    # buy&hold en retorno total manteniendo max_DD <= criterio EvalParams.max_dd.
+    # Aviso: se barrieron ~4300 combinaciones sobre un único tramo histórico, así que
+    # parte de la mejora puede ser ajuste a esta trayectoria concreta de precios y no
+    # alfa real. El walk-forward OOS (ver notes/) sostiene la ventaja pero con DSR
+    # calculado solo sobre una rejilla pequeña anclada cerca de este óptimo.
+    sma_regime: int = 50           # régimen: largo solo sobre la SMA, corto solo debajo
+    donchian_entry: int = 10       # ruptura del máximo/mínimo de las N barras previas
+    donchian_exit: int = 10        # salida normal; con alerta on-chain se usa la mitad
     atr_len: int = 20              # N de las Tortugas (ATR de Wilder)
 
     # --- Riesgo y piramidación (Tortugas) ---
     stop_atr: float = 2.0          # stop común a 2N de la última entrada
     stop_atr_alert: float = 1.5    # stop ceñido cuando salta la alerta on-chain
-    add_step_atr: float = 1.0      # añade una unidad cada 1N de avance
+    add_step_atr: float = 0.5      # añade una unidad cada 0.5N de avance
     max_units: int = 4
-    risk_per_unit: float = 0.01    # % de la cuenta que se pierde por unidad si salta el stop
-    max_leverage: float = 3.0      # techo de exposición nocional / equity
+    risk_per_unit: float = 0.02    # % de la cuenta que se pierde por unidad si salta el stop
+    max_leverage: float = 5.0      # techo de exposición nocional / equity
 
-    allow_shorts: bool = True      # cortos permitidos en cripto
+    allow_shorts: bool = False     # los cortos lastraban el retorno en el sesgo alcista de ETH
     use_onchain: bool = True       # variante B (con on-chain) vs A (sin)
 
 
